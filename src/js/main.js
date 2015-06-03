@@ -1,33 +1,87 @@
 'use strict';
 
-import {partialRight, invoke} from 'lodash';
+import Cycle from 'cyclejs';
+const {h} = Cycle;
+import hashtag from 'hashtag';
+import mori from 'mori';
+const {merge, assoc, conj} = mori;
 
-Promise.all([
-  fetch('https://api.github.com/repos/leonidas/gulp-project-template'),
-  fetch('https://api.github.com/repos/leonidas/gulp-project-template/commits')
-])
-.then(partialRight(invoke, 'json'))
-.then(Promise.all.bind(Promise))
-.then(data => {
+const storedIdeasData = mori.toClj(JSON.parse(localStorage.getItem('ideas')));
+const defaultIdeasData = mori.hashMap('ideas', mori.vector(), 'input', '');
 
-  const [repository, commits] = data;
-  const {html_url, description, full_name} = repository;
+const initialData$ = Cycle.Rx.Observable.just(
+  merge(defaultIdeasData, storedIdeasData));
 
-  const commitItems = commits.map(item => {
-    const {commit} = item;
+function localStorageSink(ideasData) {
+  localStorage.setItem('ideas', JSON.stringify(ideasData));
+}
+function makeModification$(intents) {
+  const insertIdeaMod$ = intents.addIdea$.map((ideaText) => (ideasData) => {
 
-    return `
-      <li>
-        <span>${commit.message.replace(/\n/g, '<br />')}<span>
-        <br /><br />
-        <small>${commit.committer.name}</small>
-      </li>`;
+    const newIdeas = conj(mori.get(ideasData, 'ideas'), mori.hashMap(
+      'message', ideaText,
+      'date', Date.now(),
+      'hashtags', hashtag.parse(ideaText).tags
+    ));
+
+    return assoc(ideasData, 'ideas', newIdeas);
   });
 
-  document.body.innerHTML = `
-    <h1>${description}</h1>
-    <h2><a href="${html_url}">${full_name}</a></h2>
-    <ul>${commitItems.join('')}</ul>
-  `;
-});
+  return Cycle.Rx.Observable.merge(insertIdeaMod$);
+}
+
+const filters = {
+  hashtag(text) {
+    return hashtag.parse(text).tokens.map((token) => {
+      if(token.type === 'text') {
+        return token.text;
+      }
+      return <span className="hashtag">#{token.tag}</span>;
+    });
+  }
+};
+
+function view(ideas$) {
+  return ideas$.map(ideaData =>
+    <div>
+      <input autofocus type="text" value={''} className="myinput"/>
+      <hr />
+      <ul>
+      {
+        ideaData.ideas.reverse().map(idea =>
+          <li>{filters.hashtag(idea.message)}</li>
+        )
+      }
+      </ul>
+    </div>
+  );
+}
+
+function intent(interactions) {
+  return {
+    addIdea$: interactions.get('.myinput', 'keyup')
+      .filter(ev => ev.keyCode === 13 && ev.target.value.trim() !== '')
+      .map(ev => ev.target.value),
+    activeApp$: Cycle.Rx.Observable.fromEvent(window, 'hashchange')
+  };
+}
+
+function model(intents, source) {
+  const modification$ = makeModification$(intents);
+
+  return modification$
+    .merge(source)
+    .scan((todosData, modFn) => modFn(todosData))
+    .map(mori.toJs)
+    .shareReplay(1);
+}
+
+function computer(interactions) {
+  const ideas$ = model(intent(interactions), initialData$);
+  ideas$.subscribe(localStorageSink);
+
+  return view(ideas$);
+}
+
+Cycle.applyToDOM(document.body, computer);
 
